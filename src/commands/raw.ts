@@ -2,10 +2,32 @@ import fs from 'fs-extra';
 import path from 'path';
 import chalk from 'chalk';
 import inquirer from 'inquirer';
+import { fetchMarkdown } from '@just-every/crawl';
 import type { Config } from '../types/index.ts';
 
-export default async function rawCmd(config: Config, options: { content?: string; source?: string; type?: string; editor?: boolean }) {
+async function fetchUrlContent(url: string): Promise<string> {
+  const markdown = await fetchMarkdown(url);
+  
+  if (!markdown) {
+    throw new Error(`Failed to crawl URL: no content returned`);
+  }
+  
+  return markdown;
+}
+
+export default async function rawCmd(config: Config, options: { content?: string; source?: string; type?: string; editor?: boolean; url?: string }) {
   let content = options.content;
+  
+  if (options.url) {
+    try {
+      console.log(chalk.cyan(`Fetching content from ${options.url}...`));
+      content = await fetchUrlContent(options.url);
+      console.log(chalk.green('Content fetched successfully!'));
+    } catch (error) {
+      console.log(chalk.red(`Error fetching URL: ${error instanceof Error ? error.message : 'Unknown error'}`));
+      return;
+    }
+  }
   
   if (!content) {
     if (options.editor !== false) {
@@ -60,13 +82,11 @@ type: ${finalType}
   const dd = String(now.getDate()).padStart(2, '0');
   const slug = finalSource.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9\u4e00-\u9fa5-]/g, '').substring(0, 40);
   
-  // e.g. raw/untracked/2026/04/05-cc使用技巧.md
   const rawFileName = `${dd}-${slug}.md`;
   const untrackedDir = path.resolve(config.wikiRoot, config.paths.raw, 'untracked', yyyy, mm);
   await fs.ensureDir(untrackedDir);
   
   const targetPath = path.join(untrackedDir, rawFileName);
-  // If a file with the same name already exists (same day, same source), add a counter suffix
   let finalPath = targetPath;
   if (await fs.pathExists(finalPath)) {
     let counter = 2;

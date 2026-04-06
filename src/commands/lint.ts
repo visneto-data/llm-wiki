@@ -136,7 +136,7 @@ export default async function lintCmd(config: Config, options: { fix?: boolean, 
 
   try {
     const prompt = await pb.buildLintPrompt({ indexContent, pages: allPageContents });
-    const response = await llm.chat([{ role: 'user', content: prompt }]);
+    const response = await llm.chatWithFallback([{ role: 'user', content: prompt }]);
     spinner.stop();
 
     if (!response) throw new Error('Empty response from LLM');

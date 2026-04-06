@@ -1,0 +1,8 @@
+llm:
+  provider: ollama
+  model: gemma4:e2b
+  apiKey: ollama
+  baseUrl: http://localhost:11434/v1
+  temperature: 0.3
+  thinking:
+    type: disabled

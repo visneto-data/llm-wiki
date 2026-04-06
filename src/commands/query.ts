@@ -1,13 +1,27 @@
 import chalk from 'chalk';
 import ora from 'ora';
 import inquirer from 'inquirer';
+import fs from 'fs-extra';
+import path from 'path';
 import { jsonrepair } from 'jsonrepair';
 import { LLMClient } from '../core/llmClient.ts';
 import { PromptBuilder } from '../core/promptBuilder.ts';
 import { WikiManager } from '../core/wikiManager.ts';
 import type { Config } from '../types/index.ts';
+import { createSuccessResponse, createErrorResponse, formatOutput } from '../utils/output.ts';
 
-export default async function queryCmd(config: Config, question: string | undefined, options: { save?: boolean, page?: string, noSave?: boolean, debug?: boolean }) {
+interface QueryOptions {
+  save?: boolean;
+  page?: string;
+  noSave?: boolean;
+  debug?: boolean;
+  output?: string;
+  format?: string;
+  iterations?: string;
+  context?: string;
+}
+
+export default async function queryCmd(config: Config, question: string | undefined, options: QueryOptions) {
   let finalQuestion = question;
   
   if (!finalQuestion) {
@@ -30,10 +44,11 @@ export default async function queryCmd(config: Config, question: string | undefi
 
   const indexContent = await wm.getIndexContent();
   const loadedPages: Array<{name: string, content: string}> = [];
+  const sourceFiles: Array<{path: string, type: string, title?: string}> = [];
   let answerContent = '';
   
   let iteration = 0;
-  const MAX_ITERATIONS = 4;
+  const MAX_ITERATIONS = options.iterations ? parseInt(options.iterations, 10) : 4;
 
   while (iteration < MAX_ITERATIONS) {
      iteration++;
@@ -51,25 +66,40 @@ export default async function queryCmd(config: Config, question: string | undefi
      const spinner = ora(`Agent is thinking (Iteration ${iteration})...`).start();
      let response: string | null = '';
      try {
-        response = await llm.chat([{ role: 'user', content: promptText }]);
+        response = await llm.chatWithFallback([{ role: 'user', content: promptText }]);
         spinner.stop();
      } catch (err) {
         spinner.stop();
+        if (options.format === 'json') {
+          const errorResp = createErrorResponse('query', 'LLM_API_ERROR', `Agent request failed: ${err}`);
+          console.log(formatOutput(errorResp, 'json'));
+          return;
+        }
         console.error(chalk.red('\nAgent request failed:'), err);
         return;
      }
 
      if (!response) {
-         console.log(chalk.red('\nAgent returned an empty response.'));
-         return;
+        if (options.format === 'json') {
+          const errorResp = createErrorResponse('query', 'EMPTY_RESPONSE', 'Agent returned an empty response');
+          console.log(formatOutput(errorResp, 'json'));
+          return;
+        }
+        console.log(chalk.red('\nAgent returned an empty response.'));
+        return;
      }
 
      const jsonStart = response.indexOf('{');
      const jsonEnd = response.lastIndexOf('}');
      if (jsonStart === -1 || jsonEnd === -1) {
-         console.log(chalk.yellow('\nAgent failed to format output as JSON.'));
-         if (options.debug) console.log(response);
-         return;
+        if (options.format === 'json') {
+          const errorResp = createErrorResponse('query', 'MALFORMED_JSON', 'Agent failed to format output as JSON');
+          console.log(formatOutput(errorResp, 'json'));
+          return;
+        }
+        console.log(chalk.yellow('\nAgent failed to format output as JSON.'));
+        if (options.debug) console.log(response);
+        return;
      }
 
      let actionData: any;
@@ -80,9 +110,14 @@ export default async function queryCmd(config: Config, question: string | undefi
          try {
              actionData = JSON.parse(jsonrepair(rawJson));
          } catch(e2) {
-             console.log(chalk.red('\nAgent produced malformed JSON that could not be repaired.'));
-             if (options.debug) console.log(rawJson);
-             return;
+            if (options.format === 'json') {
+              const errorResp = createErrorResponse('query', 'JSON_REPAIR_FAILED', 'Agent produced malformed JSON that could not be repaired');
+              console.log(formatOutput(errorResp, 'json'));
+              return;
+            }
+            console.log(chalk.red('\nAgent produced malformed JSON that could not be repaired.'));
+            if (options.debug) console.log(rawJson);
+            return;
          }
      }
 
@@ -97,6 +132,7 @@ export default async function queryCmd(config: Config, question: string | undefi
          for (const p of newPages) {
              if (!existingNames.has(p.name)) {
                  loadedPages.push(p);
+                 sourceFiles.push({ path: p.name, type: 'concept', title: p.name });
                  addedCount++;
              }
          }
@@ -107,19 +143,52 @@ export default async function queryCmd(config: Config, question: string | undefi
                  console.log(chalk.red("Too many recursive misses. Stopping."));
              }
          }
-    } else if (actionData.action === 'answer') {
-        if (options.debug) console.log(chalk.magenta(`[DEBUG] Agent Reasoning: ${actionData.reasoning || '(none)'}`));
-        answerContent = actionData.content;
-        break;
-     } else {
+      } else if (actionData.action === 'answer') {
+         if (options.debug) console.log(chalk.magenta(`[DEBUG] Agent Reasoning: ${actionData.reasoning || '(none)'}`));
+         answerContent = actionData.content;
+         break;
+      } else {
+         if (options.format === 'json') {
+            const errorResp = createErrorResponse('query', 'UNKNOWN_ACTION', `Unknown action from Agent: ${actionData.action}`);
+            console.log(formatOutput(errorResp, 'json'));
+            return;
+         }
          console.log(chalk.red(`Unknown action from Agent: ${actionData.action}`));
          return;
-     }
+      }
   }
 
   if (!answerContent) {
+      if (options.format === 'json') {
+        const errorResp = createErrorResponse('query', 'MAX_ITERATIONS', 'Failed to generate an answer within the iteration limit');
+        console.log(formatOutput(errorResp, 'json'));
+        return;
+      }
       console.log(chalk.red("Failed to generate an answer within the iteration limit."));
       return;
+  }
+
+  const model = config.llm?.model || 'unknown';
+  let savedTo: string | undefined;
+
+  if (options.format === 'json') {
+    const response = createSuccessResponse('query', {
+      question: finalQuestion,
+      answer: answerContent,
+      sources: sourceFiles,
+      iterations: iteration,
+      model: model
+    });
+    
+    console.log(formatOutput(response, 'json'));
+    
+    if (options.output) {
+      await fs.writeFile(options.output, answerContent, 'utf8');
+      console.log(chalk.green(`Answer saved to ${options.output}`));
+    }
+    
+    await wm.appendLog('query', `Question: "${finalQuestion}" | Iterations: ${iteration} | Pages read: ${loadedPages.length}`);
+    return;
   }
 
   console.log(chalk.cyan(`\n================= ANSWER =================\n`));
@@ -127,6 +196,11 @@ export default async function queryCmd(config: Config, question: string | undefi
   console.log(chalk.cyan(`\n==========================================\n`));
   
   await wm.appendLog('query', `Question: "${finalQuestion}" | Iterations: ${iteration} | Pages read: ${loadedPages.length}`);
+
+  if (options.output) {
+    await fs.writeFile(options.output, answerContent, 'utf8');
+    console.log(chalk.green(`Answer saved to ${options.output}`));
+  }
 
   if (options.noSave) return;
 
@@ -163,6 +237,7 @@ export default async function queryCmd(config: Config, question: string | undefi
          content: fullPageContent
      }]);
      
-     console.log(chalk.green(`\n✔ Saved answer to wiki/answers/${safeName}.md`));
+     savedTo = `wiki/answers/${safeName}.md`;
+     console.log(chalk.green(`\n✔ Saved answer to ${savedTo}`));
   }
 }

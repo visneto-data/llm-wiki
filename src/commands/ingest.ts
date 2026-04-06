@@ -93,7 +93,7 @@ export default async function ingestCmd(config: Config, file: string | undefined
       }
 
       spinner = ora('Generating wiki operations via LLM...').start();
-      const response = await llm.chat([{ role: 'user', content: promptText }]);
+      const response = await llm.chatWithFallback([{ role: 'user', content: promptText }]);
       spinner.stop();
 
       if (!response) {
