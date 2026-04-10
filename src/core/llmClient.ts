@@ -9,10 +9,16 @@ export interface ChatMessage {
 export class LLMClient {
   private config: Config;
   private fallbacks: LLMConfig[];
+  private maxRetries: number;
+  private retryDelay: number;
+  private retryableErrors: number[];
 
   constructor(config: Config) {
     this.config = config;
     this.fallbacks = config.llm.fallbacks || [];
+    this.maxRetries = config.llm.maxRetries ?? 1;
+    this.retryDelay = config.llm.retryDelay ?? 1000;
+    this.retryableErrors = config.llm.retryableErrors ?? [429, 500, 503];
   }
 
   async chat(messages: ChatMessage[]): Promise<string | null> {
@@ -27,7 +33,7 @@ export class LLMClient {
     const response = await client.chat.completions.create({
       model: this.config.llm.model,
       messages,
-      temperature: this.config.llm.temperature,
+      temperature: this.config.llm.temperature ?? 0.3,
       thinking: this.config.llm.thinking,
     } as any);
 
@@ -44,7 +50,7 @@ export class LLMClient {
 
       try {
         console.log(`[LLM] ${isPrimary ? 'Using primary' : 'Using fallback'} model: ${model.model}`);
-        const result = await this.executeChat(model, messages);
+        const result = await this.executeChatWithRetry(model, messages);
         if (result) {
           if (!isPrimary) {
             console.log(`[LLM] Fallback succeeded: ${model.model}`);
@@ -68,23 +74,46 @@ export class LLMClient {
     return null;
   }
 
-  private async executeChat(config: LLMConfig, messages: ChatMessage[]): Promise<string | null> {
+  private async executeChatWithRetry(config: LLMConfig, messages: ChatMessage[]): Promise<string | null> {
     const apiKey = config.apiKey || this.config.llm.apiKey || process.env.OPENAI_API_KEY;
     const baseUrl = config.baseUrl || this.config.llm.baseUrl;
+    const temperature = config.temperature ?? this.config.llm.temperature ?? 0.3;
+    const maxRetries = this.maxRetries;
+    const retryDelay = this.retryDelay;
+    const retryableErrors = this.retryableErrors;
 
     const client = new OpenAI({
       apiKey,
       baseURL: baseUrl,
     });
 
-    const response = await client.chat.completions.create({
-      model: config.model,
-      messages,
-      temperature: config.temperature,
-      thinking: config.thinking,
-    } as any);
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const response = await client.chat.completions.create({
+          model: config.model,
+          messages,
+          temperature,
+          thinking: config.thinking,
+        } as any);
 
-    return response.choices[0]?.message?.content || null;
+        return response.choices[0]?.message?.content || null;
+      } catch (error: any) {
+        const status = error?.status || error?.response?.status;
+
+        if (attempt < maxRetries && retryableErrors.includes(status)) {
+          console.warn(`[LLM] Retryable error ${status}, retrying in ${retryDelay}ms... (attempt ${attempt + 1}/${maxRetries})`);
+          await this.sleep(retryDelay);
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    return null;
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   private isNonRetryableError(error: any): boolean {

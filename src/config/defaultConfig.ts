@@ -9,6 +9,9 @@ export const defaultConfig: Config = {
     thinking: {
       type: 'disabled',
     },
+    maxRetries: 1,
+    retryDelay: 1000,
+    retryableErrors: [429, 500, 503],
   },
   paths: {
     raw: 'raw',
